@@ -5,7 +5,12 @@ from typing import Optional
 SAMPLE_RATE = 16000
 CHUNK_MS = 4000  # 4 seconds
 OVERLAP_MS = 500  # 0.5 seconds overlap
-BLOCKSIZE = 64000  # sounddevice blocksize (4 seconds at 16kHz)
+BLOCKSIZE = 16000  # sounddevice blocksize (1 second at 16kHz for lower latency)
+
+# Advanced buffering configuration
+MAX_AUDIO_QUEUE_SIZE = 10  # Maximum chunks in processing queue
+PROCESSING_TIMEOUT = 5.0   # Timeout for processing tasks (seconds)
+BUFFER_CHECK_INTERVAL = 0.1  # How often to check for new chunks (seconds)
 
 # VAD configuration
 VAD_FRAME_MS = 10  # 10ms frames for VAD

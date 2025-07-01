@@ -7,6 +7,8 @@ from typing import Dict, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import queue
+import threading
 
 from audio import AudioCapture
 from transcribe import MLXTranscriber
@@ -58,6 +60,11 @@ class TranscriptionService:
         self.transcriber = MLXTranscriber()
         self.is_running = False
         self.transcription_task = None
+        self.processing_task = None
+        
+        # Enhanced async processing
+        self.audio_queue = asyncio.Queue(maxsize=MAX_AUDIO_QUEUE_SIZE)  # Buffer for audio chunks
+        self.processing_active = False
 
     async def initialize(self):
         """Initialize the transcription service"""
@@ -71,20 +78,64 @@ class TranscriptionService:
             raise
 
     async def start_transcription(self):
-        """Start real-time transcription"""
+        """Start real-time transcription with parallel processing"""
         if self.is_running:
             logger.warning("Transcription already running")
             return
 
         self.is_running = True
-        logger.info("Starting real-time transcription")
+        self.processing_active = True
+        logger.info("Starting real-time transcription with enhanced processing")
         
         try:
+            # Start processing task in parallel
+            self.processing_task = asyncio.create_task(self._process_audio_queue())
+            
+            # Start audio capture and queue chunks
             async for audio_chunk in self.audio_capture.start_recording():
                 if not self.is_running:
                     break
                 
-                # Transcribe audio chunk
+                try:
+                    # Add chunk to processing queue (non-blocking)
+                    self.audio_queue.put_nowait(audio_chunk)
+                    logger.debug("Audio chunk queued for processing")
+                except asyncio.QueueFull:
+                    logger.warning("Audio processing queue full, dropping chunk")
+                    # Optionally remove oldest chunk to make room
+                    try:
+                        self.audio_queue.get_nowait()
+                        self.audio_queue.put_nowait(audio_chunk)
+                        logger.debug("Replaced oldest chunk in queue")
+                    except asyncio.QueueEmpty:
+                        pass
+                        
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
+        finally:
+            self.is_running = False
+            self.processing_active = False
+            
+            # Wait for processing task to complete
+            if self.processing_task:
+                await self.processing_task
+            
+            logger.info("Transcription stopped")
+
+    async def _process_audio_queue(self):
+        """Process audio chunks from queue in parallel"""
+        logger.info("Starting audio processing queue worker")
+        
+        while self.processing_active or not self.audio_queue.empty():
+            try:
+                # Get chunk from queue with timeout
+                audio_chunk = await asyncio.wait_for(
+                    self.audio_queue.get(), 
+                    timeout=PROCESSING_TIMEOUT
+                )
+                
+                # Process chunk
+                logger.debug("Processing audio chunk from queue")
                 result = await self.transcriber.transcribe(audio_chunk)
                 
                 if result["text"].strip():
@@ -94,18 +145,47 @@ class TranscriptionService:
                     # Keep only last 50 results to prevent memory bloat
                     if len(transcription_results) > 50:
                         transcription_results.pop(0)
-                        
-        except Exception as e:
-            logger.error(f"Transcription error: {e}")
-        finally:
-            self.is_running = False
-            logger.info("Transcription stopped")
+                
+                # Mark task as done
+                self.audio_queue.task_done()
+                
+            except asyncio.TimeoutError:
+                # No chunks available, continue if still active
+                if self.processing_active:
+                    continue
+                else:
+                    break
+            except Exception as e:
+                logger.error(f"Audio processing error: {e}")
+                # Continue processing other chunks
+                continue
+        
+        logger.info("Audio processing queue worker stopped")
 
     async def stop_transcription(self):
         """Stop real-time transcription"""
-        self.is_running = False
-        self.audio_capture.stop_recording()
         logger.info("Stopping transcription service")
+        self.is_running = False
+        self.processing_active = False
+        self.audio_capture.stop_recording()
+        
+        # Wait for processing queue to finish
+        if self.processing_task:
+            try:
+                await asyncio.wait_for(self.processing_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Processing task did not complete within timeout")
+                self.processing_task.cancel()
+        
+        # Clear any remaining chunks in queue
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        
+        logger.info("Transcription service stopped")
 
     async def cleanup(self):
         """Cleanup resources"""

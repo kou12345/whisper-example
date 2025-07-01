@@ -3,8 +3,10 @@ import webrtcvad
 import numpy as np
 import asyncio
 import logging
-from typing import Generator, Optional
+import threading
+from typing import Generator, Optional, List
 from collections import deque
+import time
 from config import *
 
 logger = logging.getLogger(__name__)
@@ -19,9 +21,16 @@ class AudioCapture:
         # Initialize VAD
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         
-        # Audio buffer
+        # Enhanced buffering system
         self.audio_buffer = deque(maxlen=self.chunk_size + self.overlap_size)
+        self.processing_buffer = deque()  # Buffer for chunks being processed
+        self.buffer_lock = threading.Lock()  # Thread safety
         self.is_recording = False
+        
+        # Statistics
+        self.chunks_captured = 0
+        self.chunks_processed = 0
+        self.chunks_dropped = 0
         
         logger.info(f"AudioCapture initialized: {self.sample_rate}Hz, chunk={self.chunk_size}, overlap={self.overlap_size}")
 
@@ -58,9 +67,9 @@ class AudioCapture:
             return True  # Assume voiced on error
 
     async def start_recording(self) -> Generator[np.ndarray, None, None]:
-        """Start non-blocking audio recording with VAD filtering"""
+        """Start non-blocking audio recording with enhanced buffering"""
         self.is_recording = True
-        logger.info("Starting audio recording")
+        logger.info("Starting enhanced audio recording")
         
         try:
             with sd.RawInputStream(
@@ -74,30 +83,27 @@ class AudioCapture:
                 logger.info(f"Audio stream started: {stream}")
                 
                 while self.is_recording:
-                    await asyncio.sleep(CHUNK_MS / 1000)  # Wait for chunk duration
+                    # Check for ready chunks in processing buffer
+                    chunk_ready = await self._get_next_chunk()
                     
-                    logger.debug(f"Buffer size: {len(self.audio_buffer)}, required: {self.chunk_size}")
-                    
-                    if len(self.audio_buffer) >= self.chunk_size:
-                        # Extract current chunk
-                        chunk = np.array(list(self.audio_buffer)[:self.chunk_size])
-                        
+                    if chunk_ready is not None:
                         # Check if chunk contains voice
-                        audio_level = np.max(np.abs(chunk))
-                        logger.info(f"Audio level: {audio_level:.4f}")
+                        audio_level = np.max(np.abs(chunk_ready))
+                        logger.debug(f"Processing chunk - Audio level: {audio_level:.4f}")
                         
-                        if self._is_voiced(chunk) or audio_level > 0.001:  # Also check basic audio level
-                            logger.info(f"Voice/Audio detected, chunk size: {len(chunk)}")
-                            yield chunk
+                        if self._is_voiced(chunk_ready) or audio_level > 0.001:
+                            logger.info(f"Voice/Audio detected, chunk size: {len(chunk_ready)}")
+                            self.chunks_processed += 1
+                            yield chunk_ready
                         else:
-                            logger.info(f"No voice detected, skipping chunk (max level: {audio_level:.4f})")
-                        
-                        # Remove processed samples, keep overlap
-                        for _ in range(self.chunk_size - self.overlap_size):
-                            if self.audio_buffer:
-                                self.audio_buffer.popleft()
+                            logger.debug(f"No voice detected, skipping chunk (max level: {audio_level:.4f})")
                     else:
-                        logger.debug(f"Waiting for more audio data...")
+                        # No chunk ready, wait a bit
+                        await asyncio.sleep(BUFFER_CHECK_INTERVAL)
+                        
+                    # Log statistics periodically
+                    if self.chunks_captured > 0 and self.chunks_captured % 10 == 0:
+                        self._log_statistics()
                                 
         except Exception as e:
             logger.error(f"Recording error: {e}")
@@ -105,6 +111,46 @@ class AudioCapture:
         finally:
             self.is_recording = False
             logger.info("Audio recording stopped")
+            self._log_statistics()
+
+    async def _get_next_chunk(self) -> Optional[np.ndarray]:
+        """Get next available chunk from processing buffer"""
+        with self.buffer_lock:
+            # Try to create a new chunk if we have enough data
+            if len(self.audio_buffer) >= self.chunk_size:
+                # Extract current chunk
+                chunk = np.array(list(self.audio_buffer)[:self.chunk_size])
+                
+                # Add to processing buffer
+                self.processing_buffer.append({
+                    'data': chunk,
+                    'timestamp': time.time()
+                })
+                
+                # Remove processed samples, keep overlap
+                for _ in range(self.chunk_size - self.overlap_size):
+                    if self.audio_buffer:
+                        self.audio_buffer.popleft()
+                
+                self.chunks_captured += 1
+            
+            # Return oldest chunk from processing buffer
+            if self.processing_buffer:
+                chunk_info = self.processing_buffer.popleft()
+                return chunk_info['data']
+        
+        return None
+
+    def _log_statistics(self):
+        """Log buffering statistics"""
+        buffer_efficiency = (self.chunks_processed / max(self.chunks_captured, 1)) * 100
+        logger.info(f"Buffer stats - Captured: {self.chunks_captured}, "
+                   f"Processed: {self.chunks_processed}, "
+                   f"Efficiency: {buffer_efficiency:.1f}%")
+        
+        with self.buffer_lock:
+            logger.debug(f"Current buffers - Audio: {len(self.audio_buffer)}, "
+                        f"Processing: {len(self.processing_buffer)}")
 
     def _audio_callback(self, indata, frames, time, status):
         """Audio input callback"""
