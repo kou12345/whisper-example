@@ -20,6 +20,12 @@ BEAM_SIZE = 5
 API_HOST = "0.0.0.0"
 API_PORT = 8000
 
+# Speaker Diarization configuration
+ENABLE_DIARIZATION = os.getenv("ENABLE_DIARIZATION", "true").lower() == "true"
+DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
+MIN_SPEAKERS = 1
+MAX_SPEAKERS = 5
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")
 

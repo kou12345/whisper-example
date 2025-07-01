@@ -181,7 +181,9 @@ async def get_status():
         "transcription": {
             "is_running": service.is_running,
             "model_name": service.transcriber.model_name,
-            "language": service.transcriber.language
+            "language": service.transcriber.language,
+            "diarization_enabled": ENABLE_DIARIZATION,
+            "diarization_loaded": service.transcriber.diarization.is_loaded if service.transcriber.diarization else False
         },
         "audio": {
             "sample_rate": service.audio_capture.sample_rate,

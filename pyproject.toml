@@ -12,6 +12,12 @@ dependencies = [
     "uvicorn[standard]",
     "fastapi",
     "python-multipart",
+    "pyannote.audio",
+    "torch",
+    "torchaudio",
+    "scikit-learn",
+    "scipy",
+    "soundfile",
 ]
 
 [tool.uv]

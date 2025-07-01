@@ -4,6 +4,7 @@ import logging
 import asyncio
 from typing import Dict, List, Optional
 from config import *
+from diarization import SpeakerDiarization
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +13,19 @@ class MLXTranscriber:
         self.model_name = MODEL_NAME
         self.language = LANGUAGE
         self.is_loaded = False
+        self.diarization = SpeakerDiarization() if ENABLE_DIARIZATION else None
         
     async def load_model(self):
-        """Initialize MLX Whisper (models are loaded on-demand)"""
+        """Initialize MLX Whisper and Speaker Diarization (models are loaded on-demand)"""
         try:
             logger.info(f"MLX Whisper ready with model: {self.model_name}")
             self.is_loaded = True
+            
+            # Load diarization model if enabled
+            if self.diarization:
+                await self.diarization.load_model()
+                logger.info("Speaker diarization initialized")
+            
             logger.info(f"MLX Whisper initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize MLX Whisper: {e}")
@@ -46,6 +54,20 @@ class MLXTranscriber:
                 self._transcribe_sync,
                 audio_data
             )
+            
+            # Perform speaker diarization if enabled
+            if self.diarization and result.get("segments"):
+                logger.debug("Running speaker diarization")
+                diarization_result = self.diarization.diarize_audio(audio_data)
+                
+                # Assign speakers to transcription segments
+                result["segments"] = self.diarization.assign_speakers_to_transcription(
+                    result["segments"], diarization_result
+                )
+                
+                # Add speaker summary
+                result["speaker_summary"] = self.diarization.get_speaker_summary(result["segments"])
+                result["diarization"] = diarization_result
             
             return result
             
@@ -105,7 +127,7 @@ class MLXTranscriber:
                         "start": segment["start"],
                         "end": segment["end"],
                         "text": segment_text,
-                        "speaker": "Unknown"  # Will be enhanced later
+                        "speaker": "Unknown"  # Will be assigned by diarization
                     })
             
             return {
@@ -125,4 +147,6 @@ class MLXTranscriber:
     def unload_model(self):
         """Cleanup resources"""
         self.is_loaded = False
-        logger.info("MLX Whisper cleaned up")
+        if self.diarization:
+            self.diarization.unload_model()
+        logger.info("MLX Whisper and diarization cleaned up")
